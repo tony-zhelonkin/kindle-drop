@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Kindle Drop — Drop EPUBs, convert to AZW3, serve over Wi-Fi for Kindle download."""
 
+import base64
 import http.server
 import json
 import os
@@ -8,6 +9,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 from pathlib import Path
 
@@ -78,6 +80,31 @@ class Api:
         )
         if result:
             self.process_files(list(result))
+
+    def process_dropped_file(self, name, data_b64):
+        """Handle a file dropped via the browser (received as base64)."""
+        try:
+            raw = base64.b64decode(data_b64)
+        except Exception as e:
+            self._log(f"FAILED: {name} — bad data ({e})")
+            return
+
+        _, ext = os.path.splitext(name)
+        ext = ext.lower()
+
+        if ext == ".epub":
+            # Write to a temp file so ebook-convert can read it
+            with tempfile.NamedTemporaryFile(suffix=".epub", delete=False) as tmp:
+                tmp.write(raw)
+                tmp_path = tmp.name
+            try:
+                self._convert_epub(tmp_path, name)
+            finally:
+                os.unlink(tmp_path)
+        else:
+            dest = SERVE_DIR / name
+            dest.write_bytes(raw)
+            self._log(f"Copied: {name}")
 
     def process_files(self, paths):
         """Convert EPUBs to AZW3, copy other files to serve directory."""
@@ -225,22 +252,17 @@ dz.addEventListener('drop', e => {
   e.preventDefault();
   dz.classList.remove('hover');
 
-  // Try to get file paths from the drop event
   const files = e.dataTransfer.files;
-  if (files.length > 0) {
-    // In pywebview, dropped files may have .path available
-    const paths = [];
-    for (let i = 0; i < files.length; i++) {
-      // webkitRelativePath or name — pywebview on macOS provides full path via File.path
-      if (files[i].path) {
-        paths.push(files[i].path);
-      }
-    }
-    if (paths.length > 0) {
-      pywebview.api.process_files(paths);
-    } else {
-      addLog("Drag-and-drop paths not available — use 'Choose files' button instead.");
-    }
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    const reader = new FileReader();
+    reader.onload = function() {
+      const b64 = btoa(
+        new Uint8Array(reader.result).reduce((s, b) => s + String.fromCharCode(b), '')
+      );
+      pywebview.api.process_dropped_file(file.name, b64);
+    };
+    reader.readAsArrayBuffer(file);
   }
 });
 
